@@ -1,0 +1,2 @@
+[console_scripts]
+piper-vla-guard-ui = piper_vla_guard.ui_app:main

@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 piper = ["piper_sdk>=0.6.0", "python-can>=3.3.4"]
 openpi = []
+vision = ["opencv-python>=4.8"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

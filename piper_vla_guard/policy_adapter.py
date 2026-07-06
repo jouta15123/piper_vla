@@ -58,6 +58,20 @@ def actions_to_json(actions: Any) -> str:
     return json.dumps({"actions": actions}, indent=2)
 
 
+def response_to_json(response: Any) -> str:
+    return json.dumps(_jsonable(response), indent=2)
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 def parse_state_json(text: str | None) -> Optional[list[float]]:
     if text is None or not text.strip():
         return None

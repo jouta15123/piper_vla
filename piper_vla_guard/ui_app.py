@@ -12,11 +12,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from .actions import SUPPORTED_ACTION_MODES, parse_action_json
+from .camera_adapter import capture_rgb_frame
 from .config import load_config
 from .executor import PlanExecutor
 from .logging_utils import JsonlLogger
 from .piper_adapter import MockPiperAdapter, PiperSDKAdapter, RobotAdapter
-from .policy_adapter import OpenPIPolicyClient, actions_to_json, parse_state_json
+from .policy_adapter import OpenPIPolicyClient, response_to_json, actions_to_json, parse_state_json
 from .safety import SafetyChecker
 from .types import EEPose, JointState, SafetyConfig, TrajectoryPlan
 
@@ -98,9 +99,31 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
             if "actions" not in response:
                 raise RuntimeError(f"OpenPI response has no actions key: {list(response.keys())}")
             text = actions_to_json(response["actions"])
-            return text, f"OK: received actions with outer length {len(response['actions'])}"
+            return text, f"OK: received actions with outer length {len(response['actions'])}", response_to_json(response)
         except Exception as exc:
-            return SAMPLE_ACTION_JSON, _err(exc)
+            return SAMPLE_ACTION_JSON, _err(exc), ""
+
+    def capture_robot_inputs(robot_camera_source: str, overhead_camera_source: str):
+        try:
+            robot = ctx.ensure_robot()
+            pose = robot.read_ee_pose()
+            joints = robot.read_joint_state()
+            state = state_json_from_robot(pose, joints)
+            wrist = capture_rgb_frame(robot_camera_source)
+            overhead = capture_rgb_frame(overhead_camera_source)
+            ctx.logger.write(
+                "capture_robot_inputs",
+                {
+                    "robot_camera_source": robot_camera_source,
+                    "overhead_camera_source": overhead_camera_source,
+                    "state": state,
+                    "has_wrist_image": wrist is not None,
+                    "has_overhead_image": overhead is not None,
+                },
+            )
+            return overhead, wrist, state, "OK: captured robot inputs."
+        except Exception as exc:
+            return None, None, "", _err(exc)
 
     def check_trajectory(action_json: str, action_mode: str):
         try:
@@ -209,11 +232,16 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
                 port = gr.Number(value=8000, precision=0, label="OpenPI port")
             prompt = gr.Textbox(value="move slightly to the right", label="Prompt")
             with gr.Row():
-                image = gr.Image(type="numpy", label="Observation image")
-                wrist_image = gr.Image(type="numpy", label="Wrist image")
+                robot_camera_source = gr.Textbox(value="", label="Robot camera source")
+                overhead_camera_source = gr.Textbox(value="", label="Overhead camera source")
+                capture_inputs_btn = gr.Button("Capture robot inputs")
+            with gr.Row():
+                image = gr.Image(type="numpy", label="Observation / overhead image")
+                wrist_image = gr.Image(type="numpy", label="Robot / wrist image")
             state_json = gr.Textbox(value="", lines=3, label="State JSON, optional")
             query_btn = gr.Button("Query OpenPI")
             openpi_status = gr.Markdown("")
+            raw_openpi_response = gr.Textbox(value="", lines=10, label="Raw OpenPI response", interactive=False)
 
         with gr.Tab("3. Safety check"):
             check_btn = gr.Button("Check trajectory")
@@ -237,7 +265,16 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
         estop_btn.click(estop, None, [robot_status, pose_table, joint_table, arm_status_md])
         resume_btn.click(resume, None, [robot_status, pose_table, joint_table, arm_status_md])
         disable_btn.click(disable, None, [robot_status, pose_table, joint_table, arm_status_md])
-        query_btn.click(query_openpi, [host, port, prompt, image, wrist_image, state_json], [action_json, openpi_status])
+        capture_inputs_btn.click(
+            capture_robot_inputs,
+            [robot_camera_source, overhead_camera_source],
+            [image, wrist_image, state_json, openpi_status],
+        )
+        query_btn.click(
+            query_openpi,
+            [host, port, prompt, image, wrist_image, state_json],
+            [action_json, openpi_status, raw_openpi_response],
+        )
         check_btn.click(check_trajectory, [action_json, action_mode], [report, plan_table, plot, plan_state])
         execute_btn.click(execute_plan, [approve_box, dry_run_box, plan_state], [execute_status, pose_table, joint_table, arm_status_md])
 
@@ -287,6 +324,15 @@ def status_markdown(status: Dict[str, Any]) -> str:
     if status.get("fault"):
         lines.append("\n**Fault reported. Do not execute a plan until this is resolved.**")
     return "\n".join(lines)
+
+
+def state_json_from_robot(pose: EEPose, joints: Optional[JointState]) -> str:
+    state = {
+        "ee_pose_m_deg": pose.as_list(),
+        "joints_deg": joints.as_list() if joints else None,
+        "state": pose.as_list() + (joints.as_list() if joints else []),
+    }
+    return json.dumps(state, indent=2)
 
 
 def plan_dataframe(plan: TrajectoryPlan) -> pd.DataFrame:
