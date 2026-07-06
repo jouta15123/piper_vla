@@ -1,0 +1,63 @@
+# Piper VLA Guard safety configuration.
+# Keep this conservative for first hardware runs.
+
+can_name: can0
+judge_flag: false
+can_auto_init: true
+dh_is_offset: 1
+start_sdk_joint_limit: true
+start_sdk_gripper_limit: true
+
+# Set true until the whole pipeline has been inspected in the UI.
+dry_run: true
+
+# Operator settings.
+require_manual_approval: true
+speed_pct: 10
+step_sleep_s: 0.20
+require_status_available: true
+
+# Execution is blocked if the arm moved too far after trajectory checking.
+max_start_pose_drift_m: 0.002
+max_start_rpy_drift_deg: 0.5
+max_start_joint_drift_deg: 1.0
+
+# VLA action interpretation.
+action_scale_xyz: 1.0
+action_scale_rpy: 1.0
+reject_on_clip: true
+reject_on_warning: false
+
+# Conservative table workspace in Piper/base coordinates.
+workspace_m:
+  x: [0.20, 0.40]
+  y: [-0.15, 0.15]
+  z: [0.10, 0.30]
+min_z_m: 0.10
+
+# One-step limits after scaling.
+max_step_xyz_m: [0.003, 0.003, 0.003]
+max_step_rpy_deg: [1.0, 1.0, 1.0]
+max_total_translation_m: 0.050
+
+# If action chunk is long, keep it short at first.
+max_horizon: 25
+
+# Piper default joint limits from SDK documentation, in degrees.
+joint_limits_deg:
+  j1: [-150.0, 150.0]
+  j2: [0.0, 180.0]
+  j3: [-170.0, 0.0]
+  j4: [-100.0, 100.0]
+  j5: [-70.0, 70.0]
+  j6: [-120.0, 120.0]
+
+joint_limit_margin_deg: 3.0
+max_joint_step_deg: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+
+# Gripper mapping. UI normalized gripper: 0=open, 1=closed.
+gripper_open_m: 0.070
+gripper_closed_m: 0.000
+gripper_effort_n_m: 1.0
+
+log_dir: logs
