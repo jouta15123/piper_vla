@@ -8,7 +8,12 @@ class ActionParseError(ValueError):
     pass
 
 
-SUPPORTED_ACTION_MODES = ["delta_base_m_deg", "absolute_ee_m_deg", "joint_delta_deg"]
+SUPPORTED_ACTION_MODES = [
+    "robosuite_osc_pose",
+    "delta_base_m_deg",
+    "absolute_ee_m_deg",
+    "joint_delta_deg",
+]
 
 
 def parse_action_json(text: str, action_mode: str) -> List[List[float]]:
@@ -55,7 +60,7 @@ def _normalize_row(row: Any, action_mode: str) -> List[float]:
 
 
 def _normalize_list_row(vals: List[float], action_mode: str) -> List[float]:
-    if action_mode == "delta_base_m_deg":
+    if action_mode in ("robosuite_osc_pose", "delta_base_m_deg"):
         if len(vals) == 3:
             return vals + [0.0, 0.0, 0.0, float("nan")]
         if len(vals) == 4:
@@ -64,7 +69,7 @@ def _normalize_list_row(vals: List[float], action_mode: str) -> List[float]:
             return vals + [float("nan")]
         if len(vals) == 7:
             return vals
-        raise ActionParseError("delta_base_m_deg rows must have 3, 4, 6, or 7 values")
+        raise ActionParseError(f"{action_mode} rows must have 3, 4, 6, or 7 values")
     if action_mode == "absolute_ee_m_deg":
         if len(vals) == 6:
             return vals + [float("nan")]
@@ -81,7 +86,7 @@ def _normalize_list_row(vals: List[float], action_mode: str) -> List[float]:
 
 
 def _normalize_dict_row(row: Dict[str, Any], action_mode: str) -> List[float]:
-    if action_mode == "delta_base_m_deg":
+    if action_mode in ("robosuite_osc_pose", "delta_base_m_deg"):
         if "dpos" in row:
             dpos = _float_seq(row["dpos"], 3, "dpos")
         else:

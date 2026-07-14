@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple
 
 import yaml
 
-from .types import SafetyConfig
+from .types import SafetyConfig, SafetyPlane
 
 
 def _tuple2(value: Any, name: str) -> Tuple[float, float]:
@@ -25,6 +25,21 @@ def _tuple6(value: Any, name: str) -> Tuple[float, float, float, float, float, f
     if not isinstance(value, (list, tuple)) or len(value) != 6:
         raise ValueError(f"{name} must be a 6-element list")
     return tuple(float(v) for v in value)  # type: ignore[return-value]
+
+
+def _plane_from_dict(value: Any, name: str) -> SafetyPlane:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a mapping")
+    if "normal" not in value:
+        raise ValueError(f"{name}.normal is required")
+    if "point" not in value:
+        raise ValueError(f"{name}.point is required")
+    return SafetyPlane(
+        name=str(value.get("name", name)),
+        normal=_tuple3(value["normal"], f"{name}.normal"),
+        point=_tuple3(value["point"], f"{name}.point"),
+        margin_m=float(value.get("margin_m", 0.0)),
+    )
 
 
 def load_config(path: str | Path | None) -> SafetyConfig:
@@ -60,6 +75,11 @@ def config_from_dict(data: Dict[str, Any], base: SafetyConfig | None = None) -> 
         "max_start_joint_drift_deg": float,
         "action_scale_xyz": float,
         "action_scale_rpy": float,
+        "robosuite_osc_xyz_scale_m": float,
+        "robosuite_osc_rot_scale_rad": float,
+        "robosuite_gripper_open_action": float,
+        "robosuite_gripper_close_action": float,
+        "robosuite_gripper_qpos_max_m": float,
         "reject_on_clip": bool,
         "reject_on_warning": bool,
         "min_z_m": float,
@@ -99,6 +119,18 @@ def config_from_dict(data: Dict[str, Any], base: SafetyConfig | None = None) -> 
             raise ValueError("joint_limits_deg must be a mapping")
         cfg.joint_limits_deg = {k: _tuple2(v, f"joint_limits_deg.{k}") for k, v in raw.items()}
 
+    if "safety_planes" in data:
+        raw_planes = data["safety_planes"]
+        if raw_planes is None:
+            cfg.safety_planes = ()
+        elif isinstance(raw_planes, list):
+            cfg.safety_planes = tuple(
+                _plane_from_dict(item, f"safety_planes[{idx}]")
+                for idx, item in enumerate(raw_planes)
+            )
+        else:
+            raise ValueError("safety_planes must be a list")
+
     _validate_config(cfg)
     return cfg
 
@@ -109,7 +141,12 @@ def _validate_config(cfg: SafetyConfig) -> None:
     _finite_nonnegative(cfg.max_start_rpy_drift_deg, "max_start_rpy_drift_deg")
     _finite_nonnegative(cfg.max_start_joint_drift_deg, "max_start_joint_drift_deg")
     _finite_nonnegative(cfg.max_total_translation_m, "max_total_translation_m")
+    _finite_nonnegative(cfg.robosuite_osc_xyz_scale_m, "robosuite_osc_xyz_scale_m")
+    _finite_nonnegative(cfg.robosuite_osc_rot_scale_rad, "robosuite_osc_rot_scale_rad")
+    _finite_nonnegative(cfg.robosuite_gripper_qpos_max_m, "robosuite_gripper_qpos_max_m")
     _finite_positive(cfg.max_horizon, "max_horizon")
+    if cfg.robosuite_gripper_open_action == cfg.robosuite_gripper_close_action:
+        raise ValueError("robosuite gripper open/close actions must differ")
 
     if not 0 <= cfg.speed_pct <= 100:
         raise ValueError("speed_pct must be in [0, 100]")
@@ -132,6 +169,16 @@ def _validate_config(cfg: SafetyConfig) -> None:
     ):
         for value in values:
             _finite_nonnegative(value, name)
+
+    for plane in cfg.safety_planes:
+        if not plane.name:
+            raise ValueError("safety plane name must not be empty")
+        for value in plane.normal + plane.point:
+            if not math.isfinite(value):
+                raise ValueError(f"safety plane {plane.name} values must be finite")
+        _finite_nonnegative(plane.margin_m, f"safety plane {plane.name} margin_m")
+        if math.sqrt(sum(v * v for v in plane.normal)) <= 1e-12:
+            raise ValueError(f"safety plane {plane.name} normal must be non-zero")
 
 
 def _finite_nonnegative(value: float, name: str) -> None:

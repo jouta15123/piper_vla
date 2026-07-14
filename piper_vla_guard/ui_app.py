@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import traceback
 from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
@@ -19,7 +21,7 @@ from .logging_utils import JsonlLogger
 from .piper_adapter import MockPiperAdapter, PiperSDKAdapter, RobotAdapter
 from .policy_adapter import OpenPIPolicyClient, response_to_json, actions_to_json, parse_state_json
 from .safety import SafetyChecker
-from .types import EEPose, JointState, SafetyConfig, TrajectoryPlan
+from .types import EEPose, GripperState, JointState, SafetyConfig, TrajectoryPlan
 
 
 SAMPLE_ACTION_JSON = json.dumps(
@@ -60,7 +62,12 @@ class AppContext:
         return msg
 
 
-def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
+def create_ui(
+    cfg: SafetyConfig,
+    real_hardware: bool = False,
+    robot_camera_source_default: str = "",
+    overhead_camera_source_default: str = "",
+):
     import gradio as gr
 
     ctx = AppContext(cfg, real_hardware=real_hardware)
@@ -108,7 +115,8 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
             robot = ctx.ensure_robot()
             pose = robot.read_ee_pose()
             joints = robot.read_joint_state()
-            state = state_json_from_robot(pose, joints)
+            gripper = robot.read_gripper_state()
+            state = state_json_from_robot(pose, joints, gripper, ctx.cfg)
             wrist = capture_rgb_frame(robot_camera_source)
             overhead = capture_rgb_frame(overhead_camera_source)
             ctx.logger.write(
@@ -222,7 +230,7 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
         with gr.Tab("2. Policy / Action chunk"):
             action_mode = gr.Dropdown(
                 choices=SUPPORTED_ACTION_MODES,
-                value="delta_base_m_deg",
+                value="robosuite_osc_pose",
                 label="Action interpretation",
             )
             action_json = gr.Textbox(value=SAMPLE_ACTION_JSON, lines=14, label="Action JSON")
@@ -232,8 +240,8 @@ def create_ui(cfg: SafetyConfig, real_hardware: bool = False):
                 port = gr.Number(value=8000, precision=0, label="OpenPI port")
             prompt = gr.Textbox(value="move slightly to the right", label="Prompt")
             with gr.Row():
-                robot_camera_source = gr.Textbox(value="", label="Robot camera source")
-                overhead_camera_source = gr.Textbox(value="", label="Overhead camera source")
+                robot_camera_source = gr.Textbox(value=robot_camera_source_default, label="Robot camera source")
+                overhead_camera_source = gr.Textbox(value=overhead_camera_source_default, label="Overhead camera source")
                 capture_inputs_btn = gr.Button("Capture robot inputs")
             with gr.Row():
                 image = gr.Image(type="numpy", label="Observation / overhead image")
@@ -319,20 +327,56 @@ def status_markdown(status: Dict[str, Any]) -> str:
     lines = ["### Arm status"]
     if not status.get("available", False):
         return "### Arm status\nStatus API not available."
-    for key in ("ctrl_mode", "arm_status", "mode_feed", "motion_status", "trajectory_num", "err_status", "fault"):
+    for key in (
+        "ctrl_mode",
+        "arm_status",
+        "mode_feed",
+        "motion_status",
+        "trajectory_num",
+        "enable_status",
+        "err_status",
+        "fault",
+    ):
         lines.append(f"- `{key}`: `{status.get(key)}`")
     if status.get("fault"):
         lines.append("\n**Fault reported. Do not execute a plan until this is resolved.**")
     return "\n".join(lines)
 
 
-def state_json_from_robot(pose: EEPose, joints: Optional[JointState]) -> str:
+def state_json_from_robot(
+    pose: EEPose,
+    joints: Optional[JointState],
+    gripper: Optional[GripperState] = None,
+    cfg: Optional[SafetyConfig] = None,
+) -> str:
+    openpi_state = None
+    if joints is not None:
+        # OpenPI PiPER training recorded robosuite qpos: 6 joint angles in
+        # radians plus two per-finger gripper qpos values. Piper SDK reports
+        # joints in degrees and one total gripper opening, so convert degrees
+        # to radians and split the opening equally across the two fingers.
+        grip_pair = robosuite_gripper_qpos_pair(gripper, cfg)
+        openpi_state = [math.radians(v) for v in joints.values_deg] + grip_pair
     state = {
         "ee_pose_m_deg": pose.as_list(),
         "joints_deg": joints.as_list() if joints else None,
-        "state": pose.as_list() + (joints.as_list() if joints else []),
+        "gripper_m": None if gripper is None else gripper.opening_m,
+        "gripper_effort_n_m": None if gripper is None else gripper.effort_n_m,
+        "state": openpi_state,
+        "observation/state": openpi_state,
     }
     return json.dumps(state, indent=2)
+
+
+def robosuite_gripper_qpos_pair(
+    gripper: Optional[GripperState],
+    cfg: Optional[SafetyConfig] = None,
+) -> list[float]:
+    if gripper is None:
+        return [0.0, 0.0]
+    qpos_max = 0.035 if cfg is None else cfg.robosuite_gripper_qpos_max_m
+    qpos = max(0.0, min(qpos_max, gripper.opening_m / 2.0))
+    return [qpos, qpos]
 
 
 def plan_dataframe(plan: TrajectoryPlan) -> pd.DataFrame:
@@ -449,6 +493,8 @@ def main() -> None:
     parser.add_argument("--can", default=None)
     parser.add_argument("--dry-run", action="store_true", help="Force dry run on")
     parser.add_argument("--real-hardware", action="store_true", help="Use piper_sdk instead of mock adapter")
+    parser.add_argument("--robot-camera-source", default=None, help="Default robot/wrist camera source")
+    parser.add_argument("--overhead-camera-source", default=None, help="Default overhead/front camera source")
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
@@ -459,7 +505,16 @@ def main() -> None:
         cfg.can_name = args.can
     if args.dry_run:
         cfg.dry_run = True
-    demo = create_ui(cfg, real_hardware=args.real_hardware)
+
+    robot_camera_source_default = args.robot_camera_source or os.getenv("PIPER_VLA_ROBOT_CAMERA_SOURCE", "")
+    overhead_camera_source_default = args.overhead_camera_source or os.getenv("PIPER_VLA_OVERHEAD_CAMERA_SOURCE", "")
+
+    demo = create_ui(
+        cfg,
+        real_hardware=args.real_hardware,
+        robot_camera_source_default=robot_camera_source_default,
+        overhead_camera_source_default=overhead_camera_source_default,
+    )
     demo.launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
 
 

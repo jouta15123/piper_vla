@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional, Protocol
 
-from .types import EEPose, JointState, SafetyConfig
+from .types import EEPose, GripperState, JointState, SafetyConfig
 from .utils import deg_to_sdk_angle, get_first_attr, m_to_sdk_pos, sdk_angle_to_deg, sdk_pos_to_m, unwrap_message
 
 
@@ -12,6 +12,7 @@ class RobotAdapter(Protocol):
     def enable(self, speed_pct: int = 10, move_mode: str = "L") -> str: ...
     def read_ee_pose(self) -> EEPose: ...
     def read_joint_state(self) -> Optional[JointState]: ...
+    def read_gripper_state(self) -> Optional[GripperState]: ...
     def read_arm_status(self) -> Dict[str, Any]: ...
     def command_end_pose(self, pose: EEPose, speed_pct: int = 10, move_mode: str = "L") -> None: ...
     def command_joints(self, joints: JointState, speed_pct: int = 10) -> None: ...
@@ -81,13 +82,42 @@ class PiperSDKAdapter:
     def enable(self, speed_pct: int = 10, move_mode: str = "L") -> str:
         p = self._require()
         code = MOVE_MODE_TO_CODE.get(move_mode.upper(), MOVE_MODE_TO_CODE["L"])
+        if hasattr(p, "MotionCtrl_1"):
+            p.MotionCtrl_1(0x00, 0x00, 0x00)
+            time.sleep(0.01)
+        if hasattr(p, "MotionCtrl_2"):
+            p.MotionCtrl_2(0x01, code, int(speed_pct), 0x00)
+            time.sleep(0.01)
         if hasattr(p, "ModeCtrl"):
             p.ModeCtrl(0x01, code, int(speed_pct), 0x00)
             time.sleep(0.01)
-        if hasattr(p, "EnableArm"):
-            p.EnableArm(7, 0x02)
-            time.sleep(0.05)
-        return f"Enabled arm, mode={move_mode}, speed={speed_pct}%"
+        enabled = self._enable_piper(timeout_s=3.0)
+        if hasattr(p, "GripperCtrl"):
+            p.GripperCtrl(0, int(round(self.cfg.gripper_effort_n_m * 1000.0)), 0x01, 0x00)
+        return f"Enabled arm={enabled}, mode={move_mode}, speed={speed_pct}%"
+
+    def _enable_piper(self, timeout_s: float = 3.0) -> Any:
+        p = self._require()
+        deadline = time.time() + timeout_s
+        last_status: Any = None
+        while time.time() < deadline:
+            if hasattr(p, "EnablePiper"):
+                last_status = p.EnablePiper()
+                if last_status:
+                    return self._read_enable_status()
+            elif hasattr(p, "EnableArm"):
+                p.EnableArm(7, 0x02)
+                last_status = self._read_enable_status()
+                if isinstance(last_status, (list, tuple)) and all(last_status):
+                    return last_status
+            time.sleep(0.01)
+        return last_status if last_status is not None else self._read_enable_status()
+
+    def _read_enable_status(self) -> Any:
+        p = self._require()
+        if hasattr(p, "GetArmEnableStatus"):
+            return p.GetArmEnableStatus()
+        return None
 
     def read_ee_pose(self) -> EEPose:
         p = self._require()
@@ -122,6 +152,23 @@ class PiperSDKAdapter:
             vals.append(sdk_angle_to_deg(float(raw)))
         return JointState(tuple(vals))  # type: ignore[arg-type]
 
+    def read_gripper_state(self) -> Optional[GripperState]:
+        p = self._require()
+        if not hasattr(p, "GetArmGripperMsgs"):
+            return None
+        msg = p.GetArmGripperMsgs()
+        payload = unwrap_message(msg, ["gripper_state", "gripper_feedback", "gripper"])
+        raw_angle = get_first_attr(payload, ["grippers_angle", "gripper_angle", "angle", "opening"])
+        if raw_angle is None:
+            return None
+        raw_effort = get_first_attr(payload, ["grippers_effort", "gripper_effort", "effort"])
+        raw_status = get_first_attr(payload, ["status_code", "foc_status", "status"])
+        return GripperState(
+            opening_m=sdk_pos_to_m(float(raw_angle)),
+            effort_n_m=None if raw_effort is None else float(raw_effort) / 1000.0,
+            status_code=None if raw_status is None else float(raw_status),
+        )
+
     def read_arm_status(self) -> Dict[str, Any]:
         p = self._require()
         if not hasattr(p, "GetArmStatus"):
@@ -135,6 +182,7 @@ class PiperSDKAdapter:
             "mode_feed": _optional_number(payload, ["mode_feed", "mode"]),
             "motion_status": _optional_number(payload, ["motion_status"]),
             "trajectory_num": _optional_number(payload, ["trajectory_num"]),
+            "enable_status": self._read_enable_status(),
         }
         err_obj = get_first_attr(payload, ["err_status", "error_status", "err"])
         fields["err_status"] = _err_status_to_dict(err_obj)
@@ -145,7 +193,11 @@ class PiperSDKAdapter:
     def command_end_pose(self, pose: EEPose, speed_pct: int = 10, move_mode: str = "L") -> None:
         p = self._require()
         code = MOVE_MODE_TO_CODE.get(move_mode.upper(), MOVE_MODE_TO_CODE["L"])
-        if hasattr(p, "ModeCtrl"):
+        if hasattr(p, "MotionCtrl_1"):
+            p.MotionCtrl_1(0x00, 0x00, 0x00)
+        if hasattr(p, "MotionCtrl_2"):
+            p.MotionCtrl_2(0x01, code, int(speed_pct), 0x00)
+        elif hasattr(p, "ModeCtrl"):
             p.ModeCtrl(0x01, code, int(speed_pct), 0x00)
         p.EndPoseCtrl(
             m_to_sdk_pos(pose.x),
@@ -158,7 +210,9 @@ class PiperSDKAdapter:
 
     def command_joints(self, joints: JointState, speed_pct: int = 10) -> None:
         p = self._require()
-        if hasattr(p, "ModeCtrl"):
+        if hasattr(p, "MotionCtrl_2"):
+            p.MotionCtrl_2(0x01, 0x01, int(speed_pct), 0x00)
+        elif hasattr(p, "ModeCtrl"):
             p.ModeCtrl(0x01, MOVE_MODE_TO_CODE["J"], int(speed_pct), 0x00)
         p.JointCtrl(*[deg_to_sdk_angle(v) for v in joints.values_deg])
 
@@ -218,6 +272,9 @@ class MockPiperAdapter:
 
     def read_joint_state(self) -> Optional[JointState]:
         return self.joints
+
+    def read_gripper_state(self) -> Optional[GripperState]:
+        return GripperState(opening_m=0.070, effort_n_m=0.0, status_code=0.0)
 
     def read_arm_status(self) -> Dict[str, Any]:
         return dict(self.status)

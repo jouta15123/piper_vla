@@ -49,6 +49,37 @@ class JointState:
         return list(self.values_deg)
 
 
+@dataclass(frozen=True)
+class GripperState:
+    """Piper gripper opening in meters.
+
+    Piper SDK reports one gripper stroke value. OpenPI PiPER training used two
+    robosuite gripper qpos values, so callers can duplicate this scalar when
+    constructing an 8D policy state.
+    """
+
+    opening_m: float
+    effort_n_m: Optional[float] = None
+    status_code: Optional[float] = None
+
+    def as_pair(self) -> List[float]:
+        return [self.opening_m, self.opening_m]
+
+
+@dataclass(frozen=True)
+class SafetyPlane:
+    """Half-space constraint in Piper/base coordinates.
+
+    A target is allowed when dot(normal, target - point) >= margin_m.
+    Use a unit normal when possible so margin_m has an intuitive distance.
+    """
+
+    name: str
+    normal: Tuple[float, float, float]
+    point: Tuple[float, float, float]
+    margin_m: float = 0.0
+
+
 @dataclass
 class SafetyConfig:
     can_name: str = "can0"
@@ -69,6 +100,11 @@ class SafetyConfig:
 
     action_scale_xyz: float = 1.0
     action_scale_rpy: float = 1.0
+    robosuite_osc_xyz_scale_m: float = 0.05
+    robosuite_osc_rot_scale_rad: float = 0.05
+    robosuite_gripper_open_action: float = -1.0
+    robosuite_gripper_close_action: float = 1.0
+    robosuite_gripper_qpos_max_m: float = 0.035
     reject_on_clip: bool = True
     reject_on_warning: bool = False
 
@@ -76,6 +112,7 @@ class SafetyConfig:
     workspace_y_m: Tuple[float, float] = (-0.15, 0.15)
     workspace_z_m: Tuple[float, float] = (0.10, 0.30)
     min_z_m: float = 0.10
+    safety_planes: Tuple[SafetyPlane, ...] = ()
 
     max_step_xyz_m: Tuple[float, float, float] = (0.003, 0.003, 0.003)
     max_step_rpy_deg: Tuple[float, float, float] = (1.0, 1.0, 1.0)

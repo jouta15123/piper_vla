@@ -14,7 +14,7 @@ dry_run: true
 # Operator settings.
 require_manual_approval: true
 speed_pct: 10
-step_sleep_s: 0.20
+step_sleep_s: 0.80
 require_status_available: true
 
 # Execution is blocked if the arm moved too far after trajectory checking.
@@ -25,20 +25,39 @@ max_start_joint_drift_deg: 1.0
 # VLA action interpretation.
 action_scale_xyz: 1.0
 action_scale_rpy: 1.0
-reject_on_clip: true
+
+# OpenPI PiPER checkpoints were trained by feeding raw robosuite OSC_POSE
+# actions to env.step(action). The first six values are normalized controller
+# inputs in [-1, 1], mapped by robosuite's osc_piper.json to +/-0.05 m/rad.
+robosuite_osc_xyz_scale_m: 0.05
+robosuite_osc_rot_scale_rad: 0.05
+robosuite_gripper_open_action: -1.0
+robosuite_gripper_close_action: 1.0
+robosuite_gripper_qpos_max_m: 0.035
+reject_on_clip: false
 reject_on_warning: false
 
 # Conservative table workspace in Piper/base coordinates.
+# Adjusted to match actual Piper rest position (x≈0.05, y≈0, z≈0.17).
 workspace_m:
-  x: [0.20, 0.40]
+  x: [0.00, 0.25]
   y: [-0.15, 0.15]
-  z: [0.10, 0.30]
-min_z_m: 0.10
+  z: [0.139718, 0.35]
+min_z_m: 0.139718
+
+# Optional half-space safety planes in Piper/base coordinates.
+# Leave this empty until the real table / fixture parameters are measured.
+# A target is allowed when dot(normal, target - point) >= margin_m.
+safety_planes:
+  - name: table_clearance
+    normal: [0.0, 0.0, 1.0]
+    point: [0.0, 0.0, 0.139718]
+    margin_m: 0.0
 
 # One-step limits after scaling.
-max_step_xyz_m: [0.003, 0.003, 0.003]
-max_step_rpy_deg: [1.0, 1.0, 1.0]
-max_total_translation_m: 0.050
+max_step_xyz_m: [0.005, 0.005, 0.005]
+max_step_rpy_deg: [2.0, 2.0, 2.0]
+max_total_translation_m: 0.200
 
 # If action chunk is long, keep it short at first.
 max_horizon: 25
@@ -56,7 +75,7 @@ joint_limit_margin_deg: 3.0
 max_joint_step_deg: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
 
 # Gripper mapping. UI normalized gripper: 0=open, 1=closed.
-gripper_open_m: 0.070
+gripper_open_m: 0.095
 gripper_closed_m: 0.000
 gripper_effort_n_m: 1.0
 

@@ -20,7 +20,7 @@ class SafetyChecker:
         action_mode: str = "delta_base_m_deg",
         current_joints: Optional[JointState] = None,
     ) -> TrajectoryPlan:
-        if action_mode not in ("delta_base_m_deg", "absolute_ee_m_deg", "joint_delta_deg"):
+        if action_mode not in ("robosuite_osc_pose", "delta_base_m_deg", "absolute_ee_m_deg", "joint_delta_deg"):
             raise ValueError(f"Unsupported action_mode: {action_mode}")
         if len(actions) > self.cfg.max_horizon:
             initial_violation = f"horizon {len(actions)} > max_horizon {self.cfg.max_horizon}"
@@ -32,7 +32,7 @@ class SafetyChecker:
         joints = current_joints
 
         for idx, raw in enumerate(actions):
-            row = [require_finite(x, f"actions[{idx}] value") for x in raw]
+            row = self._require_action_row(raw, idx)
             step = self._build_step(idx, action_mode, row, pose, joints, current_pose)
             if initial_violation:
                 step.violations.append(initial_violation)
@@ -61,6 +61,16 @@ class SafetyChecker:
             summary=summary,
         )
 
+    def _require_action_row(self, raw: Sequence[float], index: int) -> List[float]:
+        row = [float(x) for x in raw]
+        if not row:
+            raise ValueError(f"actions[{index}] must not be empty")
+        for value_index, value in enumerate(row):
+            if value_index == len(row) - 1 and math.isnan(value):
+                continue
+            require_finite(value, f"actions[{index}] value")
+        return row
+
     def _build_step(
         self,
         index: int,
@@ -71,6 +81,8 @@ class SafetyChecker:
         initial_pose: EEPose,
     ) -> TrajectoryStep:
         raw = self._normalize_row(raw, action_mode)
+        if action_mode == "robosuite_osc_pose":
+            return self._step_robosuite_osc_pose(index, raw, pose, initial_pose)
         if action_mode == "delta_base_m_deg":
             return self._step_delta_pose(index, raw, pose, initial_pose)
         if action_mode == "absolute_ee_m_deg":
@@ -80,7 +92,7 @@ class SafetyChecker:
         raise ValueError(action_mode)
 
     def _normalize_row(self, raw: List[float], action_mode: str) -> List[float]:
-        if action_mode == "delta_base_m_deg":
+        if action_mode in ("robosuite_osc_pose", "delta_base_m_deg"):
             if len(raw) == 3:
                 return raw + [0.0, 0.0, 0.0, float("nan")]
             if len(raw) == 4:
@@ -89,7 +101,7 @@ class SafetyChecker:
                 return raw + [float("nan")]
             if len(raw) == 7:
                 return raw
-            raise ValueError("delta_base_m_deg rows must have 3, 4, 6, or 7 values")
+            raise ValueError(f"{action_mode} rows must have 3, 4, 6, or 7 values")
         if action_mode == "absolute_ee_m_deg":
             if len(raw) == 6:
                 return raw + [float("nan")]
@@ -103,6 +115,51 @@ class SafetyChecker:
                 return raw
             raise ValueError("joint_delta_deg rows must have 6 or 7 values")
         raise ValueError(action_mode)
+
+    def _step_robosuite_osc_pose(
+        self,
+        index: int,
+        raw: List[float],
+        pose: EEPose,
+        initial_pose: EEPose,
+    ) -> TrajectoryStep:
+        scaled = [
+            raw[0] * self.cfg.robosuite_osc_xyz_scale_m,
+            raw[1] * self.cfg.robosuite_osc_xyz_scale_m,
+            raw[2] * self.cfg.robosuite_osc_xyz_scale_m,
+            math.degrees(raw[3] * self.cfg.robosuite_osc_rot_scale_rad),
+            math.degrees(raw[4] * self.cfg.robosuite_osc_rot_scale_rad),
+            math.degrees(raw[5] * self.cfg.robosuite_osc_rot_scale_rad),
+            raw[6],
+        ]
+        clipped = [
+            clamp_abs(scaled[0], self.cfg.max_step_xyz_m[0]),
+            clamp_abs(scaled[1], self.cfg.max_step_xyz_m[1]),
+            clamp_abs(scaled[2], self.cfg.max_step_xyz_m[2]),
+            clamp_abs(scaled[3], self.cfg.max_step_rpy_deg[0]),
+            clamp_abs(scaled[4], self.cfg.max_step_rpy_deg[1]),
+            clamp_abs(scaled[5], self.cfg.max_step_rpy_deg[2]),
+            scaled[6],
+        ]
+        target = pose.moved_by(clipped[:3], clipped[3:6])
+        step = TrajectoryStep(
+            index=index,
+            action_mode="robosuite_osc_pose",
+            raw_action=raw,
+            scaled_action=scaled,
+            clipped_action=clipped,
+            start_pose=pose,
+            target_pose=target,
+            gripper_m=self._map_gripper_robosuite(clipped[6]),
+        )
+        if not is_close_list(scaled[:6], clipped[:6]):
+            msg = "robosuite OSC action clipped by one-step limit"
+            step.warnings.append(msg)
+            if self.cfg.reject_on_clip:
+                step.violations.append(msg)
+        self._check_cartesian_step(step, initial_pose)
+        self._check_gripper(step)
+        return step
 
     def _step_delta_pose(
         self,
@@ -138,7 +195,7 @@ class SafetyChecker:
             clipped_action=clipped,
             start_pose=pose,
             target_pose=target,
-            gripper_m=self._map_gripper(clipped[6]),
+            gripper_m=self._map_gripper_normalized_01(clipped[6]),
         )
         if not is_close_list(scaled[:6], clipped[:6]):
             msg = "action clipped by one-step limit"
@@ -184,7 +241,7 @@ class SafetyChecker:
             clipped_action=clipped,
             start_pose=pose,
             target_pose=clipped_target,
-            gripper_m=self._map_gripper(raw[6]),
+            gripper_m=self._map_gripper_normalized_01(raw[6]),
         )
         if not is_close_list(deltas, clipped_delta):
             msg = "absolute target clipped by one-step limit"
@@ -214,7 +271,7 @@ class SafetyChecker:
                 target_pose=None,
                 start_joints=None,
                 target_joints=None,
-                gripper_m=self._map_gripper(raw[6]),
+                gripper_m=self._map_gripper_normalized_01(raw[6]),
             )
             step.violations.append("joint_delta_deg requires current joint feedback")
             self._check_gripper(step)
@@ -231,7 +288,7 @@ class SafetyChecker:
             start_pose=pose,
             start_joints=joints,
             target_joints=target_joints,
-            gripper_m=self._map_gripper(raw[6]),
+            gripper_m=self._map_gripper_normalized_01(raw[6]),
         )
         if not is_close_list(scaled[:6], clipped_delta):
             msg = "joint action clipped by max_joint_step_deg"
@@ -260,6 +317,7 @@ class SafetyChecker:
             )
         if target.z < self.cfg.min_z_m:
             step.violations.append(f"below min_z_m: {target.z:.4f} < {self.cfg.min_z_m:.4f}")
+        self._check_safety_planes(step)
 
         dxyz = [target.x - step.start_pose.x, target.y - step.start_pose.y, target.z - step.start_pose.z]
         drpy = [target.rx - step.start_pose.rx, target.ry - step.start_pose.ry, target.rz - step.start_pose.rz]
@@ -274,6 +332,26 @@ class SafetyChecker:
             step.violations.append(
                 f"total translation too large: {total:.4f} > {self.cfg.max_total_translation_m:.4f}"
             )
+
+    def _check_safety_planes(self, step: TrajectoryStep) -> None:
+        if step.target_pose is None:
+            return
+        target = step.target_pose
+        for plane in self.cfg.safety_planes:
+            norm = math.sqrt(sum(v * v for v in plane.normal))
+            if norm <= 1e-12:
+                step.violations.append(f"safety plane {plane.name} normal is zero")
+                continue
+            signed_distance = (
+                plane.normal[0] * (target.x - plane.point[0])
+                + plane.normal[1] * (target.y - plane.point[1])
+                + plane.normal[2] * (target.z - plane.point[2])
+            ) / norm
+            if signed_distance < plane.margin_m:
+                step.violations.append(
+                    f"safety plane {plane.name} violated: signed distance "
+                    f"{signed_distance:.4f} < margin {plane.margin_m:.4f}"
+                )
 
     def _check_joint_limits(self, step: TrajectoryStep) -> None:
         if step.target_joints is None:
@@ -297,12 +375,26 @@ class SafetyChecker:
                 warnings.append(f"current j{i} near upper limit: {value:.3f}")
         return warnings
 
-    def _map_gripper(self, normalized: float) -> Optional[float]:
+    def _map_gripper_normalized_01(self, normalized: float) -> Optional[float]:
         normalized = float(normalized)
         if math.isnan(normalized):
             return None
         require_finite(normalized, "gripper")
+        # Clamp to [0, 1] — VLA models often output values slightly outside
+        # this range (e.g. -0.1 for "fully open").
+        normalized = max(0.0, min(1.0, normalized))
         return (1.0 - normalized) * self.cfg.gripper_open_m + normalized * self.cfg.gripper_closed_m
+
+    def _map_gripper_robosuite(self, action: float) -> Optional[float]:
+        action = float(action)
+        if math.isnan(action):
+            return None
+        require_finite(action, "gripper")
+        low = self.cfg.robosuite_gripper_open_action
+        high = self.cfg.robosuite_gripper_close_action
+        t = (action - low) / (high - low)
+        t = max(0.0, min(1.0, t))
+        return (1.0 - t) * self.cfg.gripper_open_m + t * self.cfg.gripper_closed_m
 
     def _check_gripper(self, step: TrajectoryStep) -> None:
         if step.gripper_m is None:
@@ -313,8 +405,14 @@ class SafetyChecker:
                 f"gripper out of range: {step.gripper_m:.4f} m not in [{low:.4f}, {high:.4f}]"
             )
         raw_g = step.raw_action[-1]
-        if not math.isnan(float(raw_g)) and not (0.0 <= float(raw_g) <= 1.0):
-            step.violations.append(f"normalized gripper must be in [0, 1], got {raw_g}")
+        if math.isnan(float(raw_g)):
+            return
+        if step.action_mode == "robosuite_osc_pose":
+            low, high = sorted([self.cfg.robosuite_gripper_open_action, self.cfg.robosuite_gripper_close_action])
+            if not (low <= float(raw_g) <= high):
+                step.warnings.append(f"robosuite gripper outside [{low}, {high}], got {raw_g} (clamped)")
+        elif not (0.0 <= float(raw_g) <= 1.0):
+            step.warnings.append(f"normalized gripper outside [0, 1], got {raw_g} (clamped)")
 
     def _summary(self, steps: Sequence[TrajectoryStep], approved: bool) -> str:
         violations = sum(len(step.violations) for step in steps)

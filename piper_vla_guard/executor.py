@@ -67,8 +67,15 @@ class PlanExecutor:
                 self.robot.command_gripper(step.gripper_m, effort_n_m=self.cfg.gripper_effort_n_m)
 
             result["executed_steps"] += 1
-            self._log("step_executed", {"step": step.to_dict(), "status_before": status})
             time.sleep(max(0.0, self.cfg.step_sleep_s))
+            if step.target_pose is not None:
+                after_pose = self.robot.read_ee_pose()
+                target_error_m = euclidean(step.target_pose.xyz(), after_pose.xyz())
+                result["messages"].append(
+                    f"Step {step.index}: target XYZ={_fmt_xyz(step.target_pose)}, "
+                    f"after XYZ={_fmt_xyz(after_pose)}, target error={target_error_m:.6f} m"
+                )
+            self._log("step_executed", {"step": step.to_dict(), "status_before": status})
 
         result["ok"] = True
         result["messages"].append(f"Executed {result['executed_steps']} steps.")
@@ -102,6 +109,9 @@ class PlanExecutor:
     def _status_error(self, status: Dict[str, Any]) -> Optional[str]:
         if self.cfg.require_status_available and not status.get("available", False):
             return "arm status API is unavailable"
+        enable_status = status.get("enable_status")
+        if isinstance(enable_status, (list, tuple)) and enable_status and not all(enable_status):
+            return f"arm motors are not all enabled: {enable_status}"
         if status.get("fault"):
             return "arm status reports fault"
         return None
@@ -129,3 +139,7 @@ class PlanExecutor:
                 f"{max_drift:.6f} deg > {self.cfg.max_start_joint_drift_deg:.6f} deg."
             )
         return None
+
+
+def _fmt_xyz(pose: EEPose) -> str:
+    return f"({pose.x:.6f}, {pose.y:.6f}, {pose.z:.6f})"
