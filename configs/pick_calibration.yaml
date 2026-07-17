@@ -1,0 +1,56 @@
+# Provisional calibration from the five compressed-cushion contact samples.
+# Keep false until the camera pixels, grasp-center offset, and full tool
+# envelope are measured. The equal floor Z values are intentional.
+complete: false
+
+# Highest fitted contact sample, kept conservative for table clearance.
+table_z_m: 0.0689
+table_margin_m: 0.005
+cylinder_diameter_m: 0.050
+cylinder_height_m: 0.050
+
+# Perimeter-ordered XY corners of the allowed table workspace. This project
+# intentionally uses one horizontal safety floor, so all four Z values match.
+workspace_floor_corners_m:
+  - [0.112401, -0.277305, 0.0689]
+  - [0.111424, 0.274171, 0.0689]
+  - [0.516469, 0.292402, 0.0689]
+  - [0.512751, -0.303669, 0.0689]
+
+# Fitted EE-local coordinates of the single physical contact point used during
+# the five samples. Add the remaining fingertip/body extrema before completion.
+tool_points_m:
+  - [-0.00978, 0.00327, 0.03850]
+
+# Not measured yet: this must be the center between the grasping finger pads.
+finger_center_offset_m: [0.0, 0.0, 0.0]
+
+ready_joints_deg: [0.0, 100.73, -64.93, 0.0, 58.89, 0.0]
+ready_tolerance_deg: [5.0, 8.0, 8.0, 5.0, 10.0, 5.0]
+
+# Leave empty for the normal behavior: move directly from the current measured
+# joints to ready_joints_deg. Add corridor waypoints only when a direct route is
+# unsuitable; if provided, the final point must equal ready_joints_deg.
+ready_path_joints_deg: []
+
+# Corrected base coordinates for contact samples A, B, C, D. The source pixel
+# values remain placeholders and must be replaced with the corresponding image
+# coordinates in exactly the same A, B, C, D order.
+overhead:
+  source_points_px:
+    - [0.0, 0.0]
+    - [639.0, 0.0]
+    - [639.0, 479.0]
+    - [0.0, 479.0]
+  base_points_m:
+    - [0.112401, -0.277305]
+    - [0.111424, 0.274171]
+    - [0.516469, 0.292402]
+    - [0.512751, -0.303669]
+  output_size: [224, 224]
+  fill_rgb: [0, 0, 0]
+  rotate_deg: 0
+  flip_horizontal: false
+  flip_vertical: false
+
+wrist: null

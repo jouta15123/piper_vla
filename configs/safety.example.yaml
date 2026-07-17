@@ -2,6 +2,11 @@
 # Keep this conservative for first hardware runs.
 
 can_name: can0
+
+# Real execution defaults to the ROS safety filter. The VLA process never
+# opens CAN; rosbridge forwards only to the disarmed-by-default ROS filter.
+rosbridge_host: 127.0.0.1
+rosbridge_port: 9090
 judge_flag: false
 can_auto_init: true
 dh_is_offset: 1
@@ -14,8 +19,61 @@ dry_run: true
 # Operator settings.
 require_manual_approval: true
 speed_pct: 10
-step_sleep_s: 0.80
+control_hz: 20
+step_sleep_s: 0.05
 require_status_available: true
+
+# Runtime command shaping and feedback tracking.
+free_space_speed_m_s: 0.050
+near_table_speed_m_s: 0.015
+max_cartesian_accel_m_s2: 0.200
+max_rpy_speed_deg_s: 10.0
+max_rpy_accel_deg_s2: 50.0
+max_measured_joint_speed_deg_s: 30.0
+max_commanded_joint_speed_deg_s: 20.0
+joint_command_hz: 100.0
+near_table_distance_m: 0.050
+tracking_hold_error_m: 0.003
+tracking_abort_error_m: 0.005
+tracking_settle_timeout_s: 0.50
+# false matches robosuite env.step timing: sample feedback after one 50 ms
+# action period, then rebase the next delta on that live state.
+settle_each_vla_step: false
+
+# Real EndPoseCtrl/MoveL testing at the checkpoint-ready pose produced Piper
+# arm_status=TARGET_POS_EXCEEDS_LIMIT before the VLA target was sent. Keep the
+# fail-closed checked numerical IK -> JointCtrl path as the real default.
+cartesian_execution_mode: joint_ik
+ik_position_tolerance_m: 0.0005
+ik_rotation_tolerance_deg: 0.5
+ik_max_iterations: 60
+ik_damping: 0.02
+ik_jacobian_delta_rad: 0.001
+ik_max_update_deg: 1.0
+ik_path_sample_step_deg: 0.25
+
+# Ready-return execution limits. Optional corridor waypoints live in
+# pick_calibration.yaml; an empty path means current measured joints -> ready.
+ready_return_speed_pct: 5
+ready_return_max_step_deg: 2.0
+ready_return_tracking_tolerance_deg: 0.35
+ready_return_step_timeout_s: 4.0
+ready_return_total_timeout_s: 120.0
+ready_return_max_joint_speed_deg_s: 20.0
+ready_return_workspace_tolerance_m: 0.002
+# The folded bootstrap pose is base-side of the calibrated tabletop polygon.
+# Ready return therefore uses a separate checked box; VLA actions still use
+# workspace_m plus the calibrated four-corner floor polygon below.
+ready_return_workspace_m:
+  x: [0.00, 0.35]
+  y: [-0.15, 0.15]
+  # Allows resuming from the measured mid-return hold at z≈0.3523 m while
+  # retaining a finite upper bound. The replanned proportional route descends.
+  # Pick runs can finish below the old 0.139718 m EE bound while the calibrated
+  # tool point is still above the table floor. The ready path continues to
+  # check min_z, the tool envelope, and every sampled FK pose.
+  z: [0.0739, 0.37]
+ready_return_enforce_workspace_floor_polygon: false
 
 # Execution is blocked if the arm moved too far after trajectory checking.
 max_start_pose_drift_m: 0.002
@@ -41,12 +99,39 @@ reject_on_clip: false
 reject_on_warning: false
 
 # Conservative table workspace in Piper/base coordinates.
-# Adjusted to match actual Piper rest position (x≈0.05, y≈0, z≈0.17).
+# Includes both the folded feedback poses and the checkpoint ready pose
+# (SDK FK x≈0.318 m). Keep the upper bound narrow for initial VLA trials.
 workspace_m:
-  x: [0.00, 0.25]
+  x: [0.00, 0.35]
   y: [-0.15, 0.15]
   z: [0.139718, 0.35]
 min_z_m: 0.139718
+
+# Usually supplied by --calibration. Four perimeter-ordered XYZ corners form
+# the allowed XY polygon and fitted lower surface. Keep empty until measured.
+workspace_floor_corners_m: []
+workspace_floor_margin_m: 0.005
+workspace_floor_max_fit_error_m: 0.003
+
+# These are overwritten by --calibration. Real hybrid/pure-vla execution is
+# blocked until the calibration file is explicitly marked complete.
+calibration_complete: false
+table_z_m: 0.139718
+table_margin_m: 0.005
+tool_points_m: []
+cylinder_diameter_m: 0.030
+cylinder_height_m: 0.030
+grasp_width_margin_m: 0.003
+hybrid_test_lift_m: 0.015
+hybrid_total_lift_m: 0.100
+expected_ready_joints_deg: [0.0, 100.73, -64.93, 0.0, 58.89, 0.0]
+ready_joint_tolerance_deg: [5.0, 8.0, 8.0, 5.0, 10.0, 5.0]
+
+# Normal motor-disable is blocked until a mechanically supported shutdown pose
+# is measured and configured. This is intentionally not assumed to be the VLA
+# ready pose. pause_hold keeps torque and does not require these values.
+shutdown_joints_deg: null
+shutdown_joint_tolerance_deg: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
 
 # Optional half-space safety planes in Piper/base coordinates.
 # Leave this empty until the real table / fixture parameters are measured.

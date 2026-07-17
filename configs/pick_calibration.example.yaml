@@ -1,0 +1,51 @@
+# Copy this file, measure every value on the real setup, and only then set
+# complete: true. Hybrid and pure-VLA hardware execution fail closed otherwise.
+complete: false
+
+table_z_m: 0.139718
+table_margin_m: 0.005
+cylinder_diameter_m: 0.030
+cylinder_height_m: 0.030
+
+# Four measured base-frame corners in perimeter order. Their XY projection is
+# the allowed work polygon; their Z values are fit to the lower safety surface.
+# Execution keeps the EE/tool points above that surface plus the configured
+# workspace_floor_margin_m. Placeholder values keep calibration incomplete.
+workspace_floor_corners_m: []
+
+# EE-local coordinates, metres. Include both fingertips and the lowest points
+# of the gripper body. Placeholder values are intentionally absent.
+tool_points_m: []
+finger_center_offset_m: [0.0, 0.0, 0.0]
+
+ready_joints_deg: [0.0, 100.73, -64.93, 0.0, 58.89, 0.0]
+ready_tolerance_deg: [5.0, 8.0, 8.0, 5.0, 10.0, 5.0]
+
+# Leave empty to move directly from the current measured pose to
+# ready_joints_deg. Add optional corridor waypoints only if needed. Every
+# segment is sampled with SDK FK, but external obstacles/self-collision still
+# require physical validation or a full collision model.
+ready_path_joints_deg: []
+
+# Point order: top-left, top-right, bottom-right, bottom-left as seen in the
+# raw RGB frame. Replace both pixel and Piper/base coordinates after measuring.
+overhead:
+  source_points_px:
+    - [0.0, 0.0]
+    - [639.0, 0.0]
+    - [639.0, 479.0]
+    - [0.0, 479.0]
+  base_points_m:
+    - [0.25, 0.15]
+    - [0.25, -0.15]
+    - [0.00, -0.15]
+    - [0.00, 0.15]
+  output_size: [224, 224]
+  fill_rgb: [0, 0, 0]
+  rotate_deg: 0
+  flip_horizontal: false
+  flip_vertical: false
+
+# Wrist preprocessing is optional; add four measured points when perspective
+# rectification is required. Omitting wrist keeps the validated raw image.
+wrist: null

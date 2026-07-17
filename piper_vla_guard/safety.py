@@ -3,6 +3,14 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Sequence, Tuple
 
+import numpy as np
+
+from .kinematics import (
+    CartesianIKSolver,
+    IKError,
+    apply_world_pose_delta,
+    world_pose_delta,
+)
 from .types import EEPose, JointState, SafetyConfig, TrajectoryPlan, TrajectoryStep
 from .utils import clamp_abs, euclidean, is_close_list, require_finite
 
@@ -10,8 +18,9 @@ from .utils import clamp_abs, euclidean, is_close_list, require_finite
 class SafetyChecker:
     """Builds and validates a trajectory plan before Piper execution."""
 
-    def __init__(self, cfg: SafetyConfig):
+    def __init__(self, cfg: SafetyConfig, ik_solver: Optional[CartesianIKSolver] = None):
         self.cfg = cfg
+        self.ik_solver = ik_solver
 
     def build_plan(
         self,
@@ -34,6 +43,8 @@ class SafetyChecker:
         for idx, raw in enumerate(actions):
             row = self._require_action_row(raw, idx)
             step = self._build_step(idx, action_mode, row, pose, joints, current_pose)
+            if action_mode != "joint_delta_deg" and self.ik_solver is not None:
+                self._attach_cartesian_ik(step, joints)
             if initial_violation:
                 step.violations.append(initial_violation)
             steps.append(step)
@@ -60,6 +71,91 @@ class SafetyChecker:
             approved_by_safety=approved,
             summary=summary,
         )
+
+    def _attach_cartesian_ik(
+        self,
+        step: TrajectoryStep,
+        current_joints: Optional[JointState],
+    ) -> None:
+        if step.start_pose is None or step.target_pose is None:
+            return
+        step.start_joints = current_joints
+        if current_joints is None:
+            step.violations.append("joint IK requires current joint feedback")
+            return
+        try:
+            result = self.ik_solver.solve_pose_delta(
+                current_joints,
+                step.start_pose,
+                step.target_pose,
+            )
+        except IKError as exc:
+            step.violations.append(f"joint IK rejected target: {exc}")
+            return
+        step.target_joints = result.joints
+        for index, (start, target, limit) in enumerate(
+            zip(current_joints.values_deg, result.joints.values_deg, self.cfg.max_joint_step_deg),
+            start=1,
+        ):
+            delta = target - start
+            if abs(delta) > limit + 1e-9:
+                step.violations.append(
+                    f"IK j{index} step too large: {delta:.3f}deg > {limit:.3f}deg"
+                )
+            if self.cfg.settle_each_vla_step:
+                commanded_speed = abs(delta) * self.cfg.control_hz
+                if commanded_speed > self.cfg.max_commanded_joint_speed_deg_s + 1e-9:
+                    step.violations.append(
+                        f"IK j{index} cannot fit one {1.0 / self.cfg.control_hz:.3f}s action period: "
+                        f"{commanded_speed:.2f}deg/s > {self.cfg.max_commanded_joint_speed_deg_s:.2f}deg/s"
+                    )
+        self._check_joint_limits(step)
+        self._check_ik_path(step, current_joints, result.joints)
+        step.warnings.append(
+            "IK checked: "
+            f"iterations={result.iterations}, position_error={result.position_error_m:.6f}m, "
+            f"rotation_error={result.rotation_error_deg:.3f}deg"
+        )
+
+    def _check_ik_path(
+        self,
+        step: TrajectoryStep,
+        start_joints: JointState,
+        target_joints: JointState,
+    ) -> None:
+        if step.start_pose is None or self.ik_solver is None:
+            return
+        max_delta = max(
+            abs(a - b) for a, b in zip(start_joints.values_deg, target_joints.values_deg)
+        )
+        sample_count = max(1, int(math.ceil(max_delta / self.cfg.ik_path_sample_step_deg)))
+        fk_start = self.ik_solver.fk.pose(start_joints)
+        for sample_index in range(1, sample_count + 1):
+            fraction = sample_index / sample_count
+            joints = JointState(
+                tuple(
+                    start_joints.values_deg[i]
+                    + fraction * (target_joints.values_deg[i] - start_joints.values_deg[i])
+                    for i in range(6)
+                )  # type: ignore[arg-type]
+            )
+            fk_pose = self.ik_solver.fk.pose(joints)
+            dxyz, rotvec = world_pose_delta(fk_start, fk_pose)
+            predicted = apply_world_pose_delta(step.start_pose, dxyz, rotvec)
+            sample_step = TrajectoryStep(
+                index=step.index,
+                action_mode=step.action_mode,
+                raw_action=step.raw_action,
+                scaled_action=step.scaled_action,
+                clipped_action=step.clipped_action,
+                start_pose=step.start_pose,
+                target_pose=predicted,
+            )
+            self._check_cartesian_step(sample_step, step.start_pose)
+            for violation in sample_step.violations:
+                message = f"IK path sample {sample_index}/{sample_count}: {violation}"
+                if message not in step.violations:
+                    step.violations.append(message)
 
     def _require_action_row(self, raw: Sequence[float], index: int) -> List[float]:
         row = [float(x) for x in raw]
@@ -132,16 +228,16 @@ class SafetyChecker:
             math.degrees(raw[5] * self.cfg.robosuite_osc_rot_scale_rad),
             raw[6],
         ]
-        clipped = [
-            clamp_abs(scaled[0], self.cfg.max_step_xyz_m[0]),
-            clamp_abs(scaled[1], self.cfg.max_step_xyz_m[1]),
-            clamp_abs(scaled[2], self.cfg.max_step_xyz_m[2]),
-            clamp_abs(scaled[3], self.cfg.max_step_rpy_deg[0]),
-            clamp_abs(scaled[4], self.cfg.max_step_rpy_deg[1]),
-            clamp_abs(scaled[5], self.cfg.max_step_rpy_deg[2]),
-            scaled[6],
-        ]
-        target = pose.moved_by(clipped[:3], clipped[3:6])
+        clipped = (
+            _uniform_limit(scaled[:3], self.cfg.max_step_xyz_m)
+            + _uniform_limit(scaled[3:6], self.cfg.max_step_rpy_deg)
+            + [scaled[6]]
+        )
+        target = apply_world_pose_delta(
+            pose,
+            clipped[:3],
+            np.radians(np.asarray(clipped[3:6], dtype=np.float64)),
+        )
         step = TrajectoryStep(
             index=index,
             action_mode="robosuite_osc_pose",
@@ -153,7 +249,7 @@ class SafetyChecker:
             gripper_m=self._map_gripper_robosuite(clipped[6]),
         )
         if not is_close_list(scaled[:6], clipped[:6]):
-            msg = "robosuite OSC action clipped by one-step limit"
+            msg = "robosuite OSC action clipped by uniform one-step scaling"
             step.warnings.append(msg)
             if self.cfg.reject_on_clip:
                 step.violations.append(msg)
@@ -177,15 +273,11 @@ class SafetyChecker:
             raw[5] * self.cfg.action_scale_rpy,
             raw[6],
         ]
-        clipped = [
-            clamp_abs(scaled[0], self.cfg.max_step_xyz_m[0]),
-            clamp_abs(scaled[1], self.cfg.max_step_xyz_m[1]),
-            clamp_abs(scaled[2], self.cfg.max_step_xyz_m[2]),
-            clamp_abs(scaled[3], self.cfg.max_step_rpy_deg[0]),
-            clamp_abs(scaled[4], self.cfg.max_step_rpy_deg[1]),
-            clamp_abs(scaled[5], self.cfg.max_step_rpy_deg[2]),
-            scaled[6],
-        ]
+        clipped = (
+            _uniform_limit(scaled[:3], self.cfg.max_step_xyz_m)
+            + _uniform_limit(scaled[3:6], self.cfg.max_step_rpy_deg)
+            + [scaled[6]]
+        )
         target = pose.moved_by(clipped[:3], clipped[3:6])
         step = TrajectoryStep(
             index=index,
@@ -198,7 +290,7 @@ class SafetyChecker:
             gripper_m=self._map_gripper_normalized_01(clipped[6]),
         )
         if not is_close_list(scaled[:6], clipped[:6]):
-            msg = "action clipped by one-step limit"
+            msg = "action clipped by uniform one-step scaling"
             step.warnings.append(msg)
             if self.cfg.reject_on_clip:
                 step.violations.append(msg)
@@ -223,14 +315,9 @@ class SafetyChecker:
             target.ry - pose.ry,
             target.rz - pose.rz,
         ]
-        clipped_delta = [
-            clamp_abs(deltas[0], self.cfg.max_step_xyz_m[0]),
-            clamp_abs(deltas[1], self.cfg.max_step_xyz_m[1]),
-            clamp_abs(deltas[2], self.cfg.max_step_xyz_m[2]),
-            clamp_abs(deltas[3], self.cfg.max_step_rpy_deg[0]),
-            clamp_abs(deltas[4], self.cfg.max_step_rpy_deg[1]),
-            clamp_abs(deltas[5], self.cfg.max_step_rpy_deg[2]),
-        ]
+        clipped_delta = _uniform_limit(deltas[:3], self.cfg.max_step_xyz_m) + _uniform_limit(
+            deltas[3:6], self.cfg.max_step_rpy_deg
+        )
         clipped_target = pose.moved_by(clipped_delta[:3], clipped_delta[3:])
         clipped = clipped_target.as_list() + [raw[6]]
         step = TrajectoryStep(
@@ -317,10 +404,18 @@ class SafetyChecker:
             )
         if target.z < self.cfg.min_z_m:
             step.violations.append(f"below min_z_m: {target.z:.4f} < {self.cfg.min_z_m:.4f}")
+        floor_error = workspace_floor_error(target.xyz(), self.cfg)
+        if floor_error:
+            step.violations.append(floor_error)
+        self._check_tool_envelope(step)
         self._check_safety_planes(step)
 
         dxyz = [target.x - step.start_pose.x, target.y - step.start_pose.y, target.z - step.start_pose.z]
-        drpy = [target.rx - step.start_pose.rx, target.ry - step.start_pose.ry, target.rz - step.start_pose.rz]
+        drpy = (
+            list(step.clipped_action[3:6])
+            if step.action_mode == "robosuite_osc_pose" and len(step.clipped_action) >= 6
+            else [_angle_delta_deg(a, b) for a, b in zip(step.start_pose.rpy(), target.rpy())]
+        )
         for axis, value, limit in zip("xyz", dxyz, self.cfg.max_step_xyz_m):
             if abs(value) > limit + 1e-12:
                 step.violations.append(f"d{axis} too large: {value:.6f} > {limit:.6f}")
@@ -352,6 +447,26 @@ class SafetyChecker:
                     f"safety plane {plane.name} violated: signed distance "
                     f"{signed_distance:.4f} < margin {plane.margin_m:.4f}"
                 )
+
+    def _check_tool_envelope(self, step: TrajectoryStep) -> None:
+        if step.target_pose is None or not self.cfg.tool_points_m:
+            return
+        target = step.target_pose
+        rot = _rpy_rotation_matrix(target.rx, target.ry, target.rz)
+        floor = self.cfg.table_z_m + self.cfg.table_margin_m
+        for index, local in enumerate(self.cfg.tool_points_m):
+            world = tuple(
+                target.xyz()[row] + sum(rot[row][column] * local[column] for column in range(3))
+                for row in range(3)
+            )
+            world_z = world[2]
+            if world_z < floor:
+                step.violations.append(
+                    f"tool point {index} below table clearance: {world_z:.4f} < {floor:.4f}"
+                )
+            floor_error = workspace_floor_error(world, self.cfg)
+            if floor_error:
+                step.violations.append(f"tool point {index} {floor_error}")
 
     def _check_joint_limits(self, step: TrajectoryStep) -> None:
         if step.target_joints is None:
@@ -394,7 +509,15 @@ class SafetyChecker:
         high = self.cfg.robosuite_gripper_close_action
         t = (action - low) / (high - low)
         t = max(0.0, min(1.0, t))
-        return (1.0 - t) * self.cfg.gripper_open_m + t * self.cfg.robosuite_gripper_min_width_m
+        # Training geometry: fingertip separation = 20 mm mechanical offset
+        # + two 0..35 mm finger qpos values. This gives 90 mm at action=-1
+        # and 20 mm at action=0, independent of Piper's 95 mm hard stroke.
+        training_open_width = (
+            self.cfg.robosuite_gripper_min_width_m
+            + 2.0 * self.cfg.robosuite_gripper_qpos_max_m
+        )
+        width = (1.0 - t) * training_open_width + t * self.cfg.robosuite_gripper_min_width_m
+        return min(self.cfg.gripper_open_m, max(self.cfg.gripper_closed_m, width))
 
     def _check_gripper(self, step: TrajectoryStep) -> None:
         if step.gripper_m is None:
@@ -422,3 +545,69 @@ class SafetyChecker:
         if approved:
             return f"SAFETY OK: {len(steps)} steps, {warnings} warnings."
         return f"REJECTED: {len(steps)} steps, {violations} violations, {warnings} warnings."
+
+
+def _uniform_limit(values: Sequence[float], limits: Sequence[float]) -> List[float]:
+    """Scale a vector without changing its direction so every axis fits its limit."""
+    scale = 1.0
+    for value, limit in zip(values, limits):
+        if abs(float(value)) > float(limit) and abs(float(value)) > 1e-15:
+            scale = min(scale, float(limit) / abs(float(value)))
+    return [float(value) * scale for value in values]
+
+
+def _angle_delta_deg(start: float, end: float) -> float:
+    return (float(end) - float(start) + 180.0) % 360.0 - 180.0
+
+
+def _rpy_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) -> Tuple[Tuple[float, ...], ...]:
+    """Return Rz(yaw) * Ry(pitch) * Rx(roll), matching Piper's fixed-axis RPY."""
+    rx, ry, rz = map(math.radians, (rx_deg, ry_deg, rz_deg))
+    sx, cx = math.sin(rx), math.cos(rx)
+    sy, cy = math.sin(ry), math.cos(ry)
+    sz, cz = math.sin(rz), math.cos(rz)
+    return (
+        (cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx),
+        (sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx),
+        (-sy, cy * sx, cy * cx),
+    )
+
+
+def workspace_floor_error(point_xyz: Sequence[float], cfg: SafetyConfig) -> Optional[str]:
+    """Validate a point against the calibrated four-corner work surface."""
+    corners = cfg.workspace_floor_corners_m
+    if not corners:
+        return None
+    point = tuple(float(value) for value in point_xyz)
+    area_twice = sum(
+        corners[i][0] * corners[(i + 1) % 4][1]
+        - corners[(i + 1) % 4][0] * corners[i][1]
+        for i in range(4)
+    )
+    orientation = 1.0 if area_twice > 0.0 else -1.0
+    for index in range(4):
+        start = corners[index]
+        end = corners[(index + 1) % 4]
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = math.hypot(dx, dy)
+        signed_distance = orientation * (dx * (point[1] - start[1]) - dy * (point[0] - start[0])) / length
+        if signed_distance < cfg.workspace_floor_margin_m:
+            return (
+                f"outside four-corner workspace at edge {index}: signed distance "
+                f"{signed_distance:.4f}m < margin {cfg.workspace_floor_margin_m:.4f}m"
+            )
+
+    design = np.asarray([[x, y, 1.0] for x, y, _ in corners], dtype=np.float64)
+    heights = np.asarray([z for _, _, z in corners], dtype=np.float64)
+    coefficients, _, _, _ = np.linalg.lstsq(design, heights, rcond=None)
+    residual = float(np.max(np.abs(design @ coefficients - heights)))
+    if residual > cfg.workspace_floor_max_fit_error_m:
+        return (
+            f"four-corner floor is not planar: fit error {residual:.4f}m > "
+            f"{cfg.workspace_floor_max_fit_error_m:.4f}m"
+        )
+    floor_z = float(coefficients[0] * point[0] + coefficients[1] * point[1] + coefficients[2])
+    required_z = floor_z + cfg.workspace_floor_margin_m
+    if point[2] < required_z:
+        return f"below four-corner floor: z={point[2]:.4f}m < {required_z:.4f}m"
+    return None

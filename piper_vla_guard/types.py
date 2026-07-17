@@ -83,16 +83,29 @@ class SafetyPlane:
 @dataclass
 class SafetyConfig:
     can_name: str = "can0"
+    rosbridge_host: str = "127.0.0.1"
+    rosbridge_port: int = 9090
+    ros_command_topic: str = "/piper_vla/raw_command"
+    ros_heartbeat_topic: str = "/piper_vla/heartbeat"
+    ros_joint_topic: str = "/follower/current_joint_obs"
+    ros_pose_topic: str = "/follower/current_end_pose"
+    ros_status_topic: str = "/piper_vla/status"
+    ros_arm_service: str = "/piper_vla/arm"
     judge_flag: bool = False
     can_auto_init: bool = True
     dh_is_offset: int = 1
     start_sdk_joint_limit: bool = True
     start_sdk_gripper_limit: bool = True
+    # Explicitly allow takeover of an arm already held by the vendor Piper API
+    # in CAN/MoveJ with all motors enabled. The default remains fail-closed.
+    sdk_attach_enabled_can: bool = False
 
     dry_run: bool = True
     require_manual_approval: bool = True
     speed_pct: int = 10
-    step_sleep_s: float = 0.20
+    # The white-cylinder checkpoint was collected at 20 Hz.
+    control_hz: float = 20.0
+    step_sleep_s: float = 0.05
     require_status_available: bool = True
     max_start_pose_drift_m: float = 0.002
     max_start_rpy_drift_deg: float = 0.5
@@ -114,11 +127,101 @@ class SafetyConfig:
     workspace_z_m: Tuple[float, float] = (0.10, 0.30)
     min_z_m: float = 0.10
     safety_planes: Tuple[SafetyPlane, ...] = ()
+    # Four ordered base-frame XYZ corners define the allowed XY polygon and a
+    # fitted lower safety surface. Empty keeps the legacy box/planes only.
+    workspace_floor_corners_m: Tuple[Tuple[float, float, float], ...] = ()
+    workspace_floor_margin_m: float = 0.005
+    workspace_floor_max_fit_error_m: float = 0.003
 
     max_step_xyz_m: Tuple[float, float, float] = (0.003, 0.003, 0.003)
     max_step_rpy_deg: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     max_total_translation_m: float = 0.050
     max_horizon: int = 25
+
+    # Runtime Cartesian command shaping. The safety checker still validates the
+    # complete requested target; the executor walks toward it with these limits.
+    free_space_speed_m_s: float = 0.050
+    near_table_speed_m_s: float = 0.015
+    max_cartesian_accel_m_s2: float = 0.200
+    max_rpy_speed_deg_s: float = 10.0
+    max_rpy_accel_deg_s2: float = 50.0
+    max_measured_joint_speed_deg_s: float = 30.0
+    max_commanded_joint_speed_deg_s: float = 20.0
+    joint_command_hz: float = 100.0
+    near_table_distance_m: float = 0.050
+    tracking_hold_error_m: float = 0.003
+    tracking_abort_error_m: float = 0.005
+    tracking_settle_timeout_s: float = 0.50
+    settle_each_vla_step: bool = True
+
+    # Convert Cartesian VLA targets to checked JointCtrl targets before real
+    # execution. EndPoseCtrl remains an explicit compatibility mode.
+    cartesian_execution_mode: str = "end_pose"
+    ik_position_tolerance_m: float = 0.0005
+    ik_rotation_tolerance_deg: float = 0.5
+    ik_max_iterations: int = 60
+    ik_damping: float = 0.02
+    ik_jacobian_delta_rad: float = 0.001
+    ik_max_update_deg: float = 1.0
+    ik_path_sample_step_deg: float = 0.25
+
+    # Calibrated geometry. tool_points_m are points expressed in the EE frame;
+    # every configured point must remain above table_z_m + table_margin_m.
+    calibration_complete: bool = False
+    table_z_m: float = 0.0
+    table_margin_m: float = 0.005
+    tool_points_m: Tuple[Tuple[float, float, float], ...] = ()
+    cylinder_diameter_m: float = 0.030
+    cylinder_height_m: float = 0.030
+    grasp_width_margin_m: float = 0.003
+    hybrid_test_lift_m: float = 0.015
+    hybrid_total_lift_m: float = 0.100
+    expected_ready_joints_deg: Tuple[float, float, float, float, float, float] = (
+        0.0,
+        100.73,
+        -64.93,
+        0.0,
+        58.89,
+        0.0,
+    )
+    ready_joint_tolerance_deg: Tuple[float, float, float, float, float, float] = (
+        5.0,
+        8.0,
+        8.0,
+        5.0,
+        10.0,
+        5.0,
+    )
+    # Automatic ready return is additionally gated by calibrated joint
+    # waypoints. These values only shape and monitor that measured path.
+    ready_return_speed_pct: int = 2
+    ready_return_max_step_deg: float = 0.5
+    ready_return_tracking_tolerance_deg: float = 0.35
+    ready_return_step_timeout_s: float = 4.0
+    ready_return_total_timeout_s: float = 120.0
+    ready_return_max_joint_speed_deg_s: float = 12.0
+    ready_return_workspace_tolerance_m: float = 0.002
+    # Optional base-to-ready corridor. When unset, the normal VLA workspace is
+    # used. A calibrated tabletop polygon may start in front of the folded
+    # arm, so real deployments can give ready return its own checked 3D box.
+    ready_return_workspace_x_m: Optional[Tuple[float, float]] = None
+    ready_return_workspace_y_m: Optional[Tuple[float, float]] = None
+    ready_return_workspace_z_m: Optional[Tuple[float, float]] = None
+    ready_return_enforce_workspace_floor_polygon: bool = True
+
+    # Motor disable is allowed only after an operator-configured, mechanically
+    # supported shutdown posture has been reached and verified. None keeps
+    # normal shutdown disabled; the policy-ready pose is not assumed safe for
+    # power removal.
+    shutdown_joints_deg: Optional[Tuple[float, float, float, float, float, float]] = None
+    shutdown_joint_tolerance_deg: Tuple[float, float, float, float, float, float] = (
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+    )
 
     joint_limits_deg: Dict[str, Tuple[float, float]] = field(
         default_factory=lambda: {

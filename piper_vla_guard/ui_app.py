@@ -17,6 +17,7 @@ from .actions import SUPPORTED_ACTION_MODES, parse_action_json
 from .camera_adapter import capture_rgb_frame
 from .config import load_config
 from .executor import PlanExecutor
+from .kinematics import CartesianIKSolver
 from .logging_utils import JsonlLogger
 from .piper_adapter import MockPiperAdapter, PiperSDKAdapter, RobotAdapter
 from .policy_adapter import OpenPIPolicyClient, response_to_json, actions_to_json, parse_state_json
@@ -51,12 +52,12 @@ class AppContext:
 
     def ensure_robot(self) -> RobotAdapter:
         if self.robot is None:
-            self.robot = PiperSDKAdapter(self.cfg) if self.real_hardware else MockPiperAdapter()
+            self.robot = PiperSDKAdapter(self.cfg) if self.real_hardware else MockPiperAdapter(self.cfg)
             self.robot.connect()
         return self.robot
 
     def reconnect(self) -> str:
-        self.robot = PiperSDKAdapter(self.cfg) if self.real_hardware else MockPiperAdapter()
+        self.robot = PiperSDKAdapter(self.cfg) if self.real_hardware else MockPiperAdapter(self.cfg)
         msg = self.robot.connect()
         self.logger.write("connect", {"real_hardware": self.real_hardware, "can_name": self.cfg.can_name})
         return msg
@@ -84,7 +85,8 @@ def create_ui(
     def enable_arm(speed_pct: int):
         try:
             robot = ctx.ensure_robot()
-            msg = robot.enable(speed_pct=int(speed_pct), move_mode="L")
+            move_mode = "J" if ctx.cfg.cartesian_execution_mode == "joint_ik" else "L"
+            msg = robot.enable(speed_pct=int(speed_pct), move_mode=move_mode)
             ctx.logger.write("enable", {"speed_pct": int(speed_pct)})
             return f"OK: {msg}"
         except Exception as exc:
@@ -139,7 +141,12 @@ def create_ui(
             current_pose = robot.read_ee_pose()
             current_joints = robot.read_joint_state()
             actions = parse_action_json(action_json, action_mode)
-            checker = SafetyChecker(ctx.cfg)
+            ik_solver = (
+                CartesianIKSolver(ctx.cfg)
+                if ctx.cfg.cartesian_execution_mode == "joint_ik"
+                else None
+            )
+            checker = SafetyChecker(ctx.cfg, ik_solver=ik_solver)
             plan = checker.build_plan(
                 current_pose=current_pose,
                 current_joints=current_joints,
@@ -170,8 +177,20 @@ def create_ui(
         except Exception as exc:
             return _err(exc), empty_pose_df(), empty_joint_df(), ""
 
-    def estop():
+    def pause_hold():
         try:
+            robot = ctx.ensure_robot()
+            msg = robot.pause_hold()
+            ctx.logger.write("pause_hold", {})
+            pose_df, joint_df, status_md = read_state_tables(robot)
+            return f"OK: {msg}", pose_df, joint_df, status_md
+        except Exception as exc:
+            return _err(exc), empty_pose_df(), empty_joint_df(), ""
+
+    def estop(confirmation: str):
+        try:
+            if confirmation.strip() != "ESTOP":
+                raise RuntimeError("Type ESTOP before sending the real emergency-stop command")
             robot = ctx.ensure_robot()
             msg = robot.emergency_stop()
             ctx.logger.write("emergency_stop", {})
@@ -180,21 +199,13 @@ def create_ui(
         except Exception as exc:
             return _err(exc), empty_pose_df(), empty_joint_df(), ""
 
-    def resume():
+    def shutdown(confirmation: str):
         try:
+            if confirmation.strip() != "SHUTDOWN":
+                raise RuntimeError("Type SHUTDOWN before disabling motors at the safe pose")
             robot = ctx.ensure_robot()
-            msg = robot.resume()
-            ctx.logger.write("resume", {})
-            pose_df, joint_df, status_md = read_state_tables(robot)
-            return f"OK: {msg}", pose_df, joint_df, status_md
-        except Exception as exc:
-            return _err(exc), empty_pose_df(), empty_joint_df(), ""
-
-    def disable():
-        try:
-            robot = ctx.ensure_robot()
-            msg = robot.disable()
-            ctx.logger.write("disable", {})
+            msg = robot.shutdown_at_safe_pose()
+            ctx.logger.write("normal_shutdown", {})
             pose_df, joint_df, status_md = read_state_tables(robot)
             return f"OK: {msg}", pose_df, joint_df, status_md
         except Exception as exc:
@@ -216,11 +227,19 @@ def create_ui(
                 speed_pct = gr.Slider(1, 50, value=cfg.speed_pct, step=1, label="Move speed percent")
             with gr.Row():
                 connect_btn = gr.Button("Connect")
-                enable_btn = gr.Button("Enable arm / set MoveL")
+                enable_btn = gr.Button("Enable arm / checked control mode")
                 refresh_btn = gr.Button("Read state")
-                estop_btn = gr.Button("EMERGENCY STOP")
-                resume_btn = gr.Button("Resume E-stop")
-                disable_btn = gr.Button("Disable arm")
+                pause_btn = gr.Button("Pause VLA / hold current joints")
+                shutdown_confirmation = gr.Textbox(label="Type SHUTDOWN at configured safe pose")
+                shutdown_btn = gr.Button("Normal shutdown at configured safe pose")
+                estop_confirmation = gr.Textbox(label="Type ESTOP only for a real emergency")
+                estop_btn = gr.Button("REAL EMERGENCY STOP (arm may descend)")
+            gr.Markdown(
+                "Pause/Hold keeps motor torque using the measured JointCtrl target. "
+                "Normal shutdown is refused unless `shutdown_joints_deg` is configured and reached. "
+                "Emergency stop sends `EmergencyStop(0x01)` and may let the arm descend; "
+                "there is intentionally no reset/resume button."
+            )
             robot_status = gr.Markdown("Not connected.")
             with gr.Row():
                 pose_table = gr.Dataframe(value=empty_pose_df(), label="Current end-effector pose", interactive=False)
@@ -238,7 +257,7 @@ def create_ui(
             with gr.Row():
                 host = gr.Textbox(value="localhost", label="OpenPI host")
                 port = gr.Number(value=8000, precision=0, label="OpenPI port")
-            prompt = gr.Textbox(value="pick up the white cylinder.", label="Prompt")
+            prompt = gr.Textbox(value="lift the white cylinder 10cm", label="Prompt")
             with gr.Row():
                 robot_camera_source = gr.Textbox(value=robot_camera_source_default, label="Robot camera source")
                 overhead_camera_source = gr.Textbox(value=overhead_camera_source_default, label="Overhead camera source")
@@ -270,9 +289,17 @@ def create_ui(
         connect_btn.click(connect, [can_name, dry_run_box, use_real], [robot_status, pose_table, joint_table, arm_status_md])
         enable_btn.click(enable_arm, [speed_pct], [robot_status])
         refresh_btn.click(refresh_state, None, [robot_status, pose_table, joint_table, arm_status_md])
-        estop_btn.click(estop, None, [robot_status, pose_table, joint_table, arm_status_md])
-        resume_btn.click(resume, None, [robot_status, pose_table, joint_table, arm_status_md])
-        disable_btn.click(disable, None, [robot_status, pose_table, joint_table, arm_status_md])
+        pause_btn.click(pause_hold, None, [robot_status, pose_table, joint_table, arm_status_md])
+        shutdown_btn.click(
+            shutdown,
+            [shutdown_confirmation],
+            [robot_status, pose_table, joint_table, arm_status_md],
+        )
+        estop_btn.click(
+            estop,
+            [estop_confirmation],
+            [robot_status, pose_table, joint_table, arm_status_md],
+        )
         capture_inputs_btn.click(
             capture_robot_inputs,
             [robot_camera_source, overhead_camera_source],
@@ -354,7 +381,7 @@ def state_json_from_robot(
         # OpenPI PiPER training recorded robosuite qpos: 6 joint angles in
         # radians plus two per-finger gripper qpos values. Piper SDK reports
         # joints in degrees and one total gripper opening, so convert degrees
-        # to radians and split the opening equally across the two fingers.
+        # to radians and invert the simulated fingertip-width relationship.
         grip_pair = robosuite_gripper_qpos_pair(gripper, cfg)
         openpi_state = [math.radians(v) for v in joints.values_deg] + grip_pair
     state = {
@@ -375,7 +402,8 @@ def robosuite_gripper_qpos_pair(
     if gripper is None:
         return [0.0, 0.0]
     qpos_max = 0.035 if cfg is None else cfg.robosuite_gripper_qpos_max_m
-    qpos = max(0.0, min(qpos_max, gripper.opening_m / 2.0))
+    min_width = 0.020 if cfg is None else cfg.robosuite_gripper_min_width_m
+    qpos = max(0.0, min(qpos_max, (gripper.opening_m - min_width) / 2.0))
     return [qpos, qpos]
 
 

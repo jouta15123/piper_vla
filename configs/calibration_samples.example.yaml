@@ -1,0 +1,37 @@
+# This file is offline input only. Recording these values must not enable or
+# command the arm. Use teaching mode / read-only feedback and a physical E-stop.
+
+# EE-local XYZ of a rigid pointed calibration probe, measured from the same EE
+# origin reported by GetArmEndPoseMsgs(). Do not use an unknown fingertip here.
+probe_offset_m: [0.0, 0.0, 0.100]
+
+# Exactly four table contacts in perimeter order. ee_pose_m_deg is
+# [x_m, y_m, z_m, rx_deg, ry_deg, rz_deg]. pixel_xy is the same physical point
+# in the transformed camera image (raw image when rotate/flip are all disabled).
+floor_samples:
+  - name: A
+    ee_pose_m_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pixel_xy: [0.0, 0.0]
+  - name: B
+    ee_pose_m_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pixel_xy: [0.0, 0.0]
+  - name: C
+    ee_pose_m_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pixel_xy: [0.0, 0.0]
+  - name: D
+    ee_pose_m_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pixel_xy: [0.0, 0.0]
+
+# Put the finger-pad midpoint on a known base-frame point and record at least
+# three different safe wrist orientations. The calculator reports residual;
+# repeat measurement if it exceeds 0.002 m.
+finger_center_samples: []
+#  - ee_pose_m_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+#    target_point_m: [0.0, 0.0, 0.0]
+
+# Conservative swept-volume bounds in EE-local metres, measured with calipers
+# or verified CAD. Cover open and closed fingers plus the gripper body.
+tool_bounds_m:
+  x: [-0.050, 0.050]
+  y: [-0.060, 0.060]
+  z: [-0.120, 0.020]

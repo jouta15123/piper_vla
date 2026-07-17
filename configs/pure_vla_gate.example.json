@@ -1,0 +1,8 @@
+{
+  "dataset_repo_id": "local/piper_topdown_lift",
+  "checkpoint_step": 30000,
+  "image_sensitivity_pass": false,
+  "dry_run_trials": 0,
+  "hybrid_trials": 0,
+  "hybrid_successes": 0
+}

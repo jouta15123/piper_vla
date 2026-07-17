@@ -28,6 +28,44 @@ class OpenPIPolicyClient:
         self.image_tools = image_tools
         self.client = websocket_client_policy.WebsocketClientPolicy(host=host, port=int(port))
 
+    def server_metadata(self) -> Dict[str, Any]:
+        getter = getattr(self.client, "get_server_metadata", None)
+        return dict(getter() if callable(getter) else {})
+
+    def validate_identity(
+        self,
+        *,
+        dataset_repo_id: str,
+        checkpoint_step: int,
+        prompt: str,
+        fps: int = 20,
+        norm_stats_sha256: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        metadata = self.server_metadata()
+        identity = metadata.get("piper_policy_identity")
+        if not isinstance(identity, dict):
+            raise OpenPIClientError("Policy server did not provide piper_policy_identity metadata")
+        expected = {
+            "dataset_repo_id": str(dataset_repo_id),
+            "checkpoint_step": int(checkpoint_step),
+            "task_prompt": str(prompt),
+            "fps": int(fps),
+        }
+        mismatches = [
+            f"{key}: got {identity.get(key)!r}, expected {value!r}"
+            for key, value in expected.items()
+            if identity.get(key) != value
+        ]
+        if not identity.get("norm_stats_sha256"):
+            mismatches.append("norm_stats_sha256 is missing")
+        elif norm_stats_sha256 is not None and identity.get("norm_stats_sha256") != norm_stats_sha256:
+            mismatches.append(
+                f"norm_stats_sha256: got {identity.get('norm_stats_sha256')!r}, expected {norm_stats_sha256!r}"
+            )
+        if mismatches:
+            raise OpenPIClientError("Wrong policy server: " + "; ".join(mismatches))
+        return identity
+
     def infer(
         self,
         prompt: str,

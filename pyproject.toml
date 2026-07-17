@@ -25,6 +25,7 @@ piper = [
 ]
 openpi = ["openpi-client"]
 vision = ["opencv-python>=4.8"]
+ros = ["roslibpy>=1.8"]
 dev = ["pytest>=7.0"]
 
 [dependency-groups]
@@ -35,6 +36,7 @@ dev = [
 [project.scripts]
 piper-vla-guard-ui = "piper_vla_guard.ui_app:main"
 piper-vla-real-loop = "piper_vla_guard.real_loop:main"
+piper-vla-replay = "piper_vla_guard.observation_replay:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
