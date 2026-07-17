@@ -13,14 +13,17 @@ authors = [{name = "Generated with ChatGPT"}]
 dependencies = [
     "gradio>=4.44",
     "matplotlib>=3.6",
-    "numpy>=1.23",
+    "numpy>=1.23,<2.0",
     "pandas>=1.5",
     "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-piper = ["piper_sdk>=0.6.0", "python-can>=3.3.4"]
-openpi = []
+piper = [
+    "piper-sdk @ git+https://github.com/agilexrobotics/piper_sdk.git@1_0_0_beta",
+    "python-can>=3.3.4",
+]
+openpi = ["openpi-client"]
 vision = ["opencv-python>=4.8"]
 dev = ["pytest>=7.0"]
 
@@ -31,7 +34,14 @@ dev = [
 
 [project.scripts]
 piper-vla-guard-ui = "piper_vla_guard.ui_app:main"
+piper-vla-real-loop = "piper_vla_guard.real_loop:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["piper_vla_guard*"]
+
+[tool.pytest.ini_options]
+python_files = ["tests/test_*.py"]
+
+[tool.uv.sources]
+openpi-client = { path = "../docker_vla_share_clean/workspace/openpi_vla_proj/packages/openpi-client", editable = true }

@@ -1,9 +1,11 @@
+import math
 import unittest
 
 from piper_vla_guard.actions import parse_action_json
 from piper_vla_guard.config import config_from_dict
 from piper_vla_guard.executor import PlanExecutor
 from piper_vla_guard.piper_adapter import MockPiperAdapter
+from piper_vla_guard.real_loop import apply_action_xyz_signs, robot_state_vector, select_action_chunk
 from piper_vla_guard.safety import SafetyChecker
 from piper_vla_guard.types import EEPose, GripperState, JointState, SafetyConfig, SafetyPlane
 from piper_vla_guard.ui_app import robosuite_gripper_qpos_pair
@@ -40,11 +42,18 @@ class SafetyTests(unittest.TestCase):
         self.assertAlmostEqual(plan.steps[0].target_pose.x, 0.35)
         self.assertAlmostEqual(plan.steps[0].gripper_m, cfg.gripper_open_m)
 
-    def test_robosuite_gripper_close_maps_to_closed_width(self):
+    def test_robosuite_gripper_close_maps_to_piper_grasp_width(self):
         actions = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]
         plan = SafetyChecker(self.cfg).build_plan(self.pose, actions, "robosuite_osc_pose", self.joints)
 
-        self.assertAlmostEqual(plan.steps[0].gripper_m, self.cfg.gripper_closed_m)
+        self.assertAlmostEqual(plan.steps[0].gripper_m, self.cfg.robosuite_gripper_min_width_m)
+
+    def test_robosuite_piper_partial_close_maps_to_object_width(self):
+        actions = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1]]
+        plan = SafetyChecker(self.cfg).build_plan(self.pose, actions, "robosuite_osc_pose", self.joints)
+
+        expected = 0.1 * self.cfg.gripper_open_m + 0.9 * self.cfg.robosuite_gripper_min_width_m
+        self.assertAlmostEqual(plan.steps[0].gripper_m, expected)
 
     def test_robot_gripper_opening_is_split_into_robosuite_qpos_pair(self):
         pair = robosuite_gripper_qpos_pair(GripperState(opening_m=0.070), self.cfg)
@@ -156,6 +165,34 @@ class SafetyTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["executed_steps"], 1)
+
+    def test_real_loop_state_matches_openpi_piper_shape(self):
+        robot = MockPiperAdapter()
+        robot.connect()
+
+        state = robot_state_vector(robot, self.cfg)
+
+        self.assertEqual(len(state), 8)
+        self.assertAlmostEqual(state[1], math.radians(60.0))
+        self.assertEqual(state[-2:], [0.035, 0.035])
+
+    def test_real_loop_selects_safe_chunk_prefix(self):
+        response = {"actions": [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]] * 10}
+
+        chunk = select_action_chunk(response, chunk_size=5, max_horizon=3)
+
+        self.assertEqual(chunk.shape, (3, 7))
+
+    def test_real_loop_can_flip_action_axes_for_calibration(self):
+        response = {"actions": [[0.1, -0.2, 0.3, 0.0, 0.0, 0.0, -1.0]]}
+        chunk = select_action_chunk(response, chunk_size=1, max_horizon=1)
+
+        transformed = apply_action_xyz_signs(chunk, "-1,1,-1")
+
+        self.assertAlmostEqual(transformed[0, 0], -0.1)
+        self.assertAlmostEqual(transformed[0, 1], -0.2)
+        self.assertAlmostEqual(transformed[0, 2], -0.3)
+        self.assertAlmostEqual(transformed[0, 6], -1.0)
 
 
 if __name__ == "__main__":

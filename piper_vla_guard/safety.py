@@ -394,7 +394,7 @@ class SafetyChecker:
         high = self.cfg.robosuite_gripper_close_action
         t = (action - low) / (high - low)
         t = max(0.0, min(1.0, t))
-        return (1.0 - t) * self.cfg.gripper_open_m + t * self.cfg.gripper_closed_m
+        return (1.0 - t) * self.cfg.gripper_open_m + t * self.cfg.robosuite_gripper_min_width_m
 
     def _check_gripper(self, step: TrajectoryStep) -> None:
         if step.gripper_m is None:

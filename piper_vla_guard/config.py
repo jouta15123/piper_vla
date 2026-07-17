@@ -80,6 +80,7 @@ def config_from_dict(data: Dict[str, Any], base: SafetyConfig | None = None) -> 
         "robosuite_gripper_open_action": float,
         "robosuite_gripper_close_action": float,
         "robosuite_gripper_qpos_max_m": float,
+        "robosuite_gripper_min_width_m": float,
         "reject_on_clip": bool,
         "reject_on_warning": bool,
         "min_z_m": float,
@@ -144,9 +145,12 @@ def _validate_config(cfg: SafetyConfig) -> None:
     _finite_nonnegative(cfg.robosuite_osc_xyz_scale_m, "robosuite_osc_xyz_scale_m")
     _finite_nonnegative(cfg.robosuite_osc_rot_scale_rad, "robosuite_osc_rot_scale_rad")
     _finite_nonnegative(cfg.robosuite_gripper_qpos_max_m, "robosuite_gripper_qpos_max_m")
+    _finite_nonnegative(cfg.robosuite_gripper_min_width_m, "robosuite_gripper_min_width_m")
     _finite_positive(cfg.max_horizon, "max_horizon")
     if cfg.robosuite_gripper_open_action == cfg.robosuite_gripper_close_action:
         raise ValueError("robosuite gripper open/close actions must differ")
+    if cfg.robosuite_gripper_min_width_m > cfg.gripper_open_m:
+        raise ValueError("robosuite_gripper_min_width_m must be <= gripper_open_m")
 
     if not 0 <= cfg.speed_pct <= 100:
         raise ValueError("speed_pct must be in [0, 100]")

@@ -103,8 +103,9 @@ class SafetyConfig:
     robosuite_osc_xyz_scale_m: float = 0.05
     robosuite_osc_rot_scale_rad: float = 0.05
     robosuite_gripper_open_action: float = -1.0
-    robosuite_gripper_close_action: float = 1.0
+    robosuite_gripper_close_action: float = 0.0
     robosuite_gripper_qpos_max_m: float = 0.035
+    robosuite_gripper_min_width_m: float = 0.020
     reject_on_clip: bool = True
     reject_on_warning: bool = False
 

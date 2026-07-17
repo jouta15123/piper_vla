@@ -238,7 +238,7 @@ def create_ui(
             with gr.Row():
                 host = gr.Textbox(value="localhost", label="OpenPI host")
                 port = gr.Number(value=8000, precision=0, label="OpenPI port")
-            prompt = gr.Textbox(value="move slightly to the right", label="Prompt")
+            prompt = gr.Textbox(value="pick up the white cylinder.", label="Prompt")
             with gr.Row():
                 robot_camera_source = gr.Textbox(value=robot_camera_source_default, label="Robot camera source")
                 overhead_camera_source = gr.Textbox(value=overhead_camera_source_default, label="Overhead camera source")
